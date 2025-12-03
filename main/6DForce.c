@@ -16,11 +16,21 @@
 #include "esp_system.h"
 #include "nvs_flash.h"
 #include "driver/uart.h"
+#include "driver/twai.h"
 #include "freertos/queue.h"
 #include "esp_log.h"
 #include "sdkconfig.h"
 
 #define TAG "RS485_SENSOR"
+
+/** @brief CAN引脚定义 */
+#define CAN_TX_PIN            (6)     /**< CAN发送引脚 */
+#define CAN_RX_PIN            (7)     /**< CAN接收引脚 */
+#define CAN_ID                (0x71)  /**< CAN帧ID */
+
+/** @brief CAN帧头定义 */
+#define CAN_FRAME_HEADER_F    (0x01)  /**< 力数据帧头 */
+#define CAN_FRAME_HEADER_M    (0x02)  /**< 力矩数据帧头 */
 
 /** @brief UART引脚定义 */
 #define UART_TXD            (9)     /**< 发送引脚 */
@@ -224,6 +234,164 @@ static void print_sensor_data(const sensor_data_t *sensor_data)
 }
 
 /**
+ * @brief 将float力值转换为int16（乘以100去除小数）
+ * 
+ * @param force float类型的力值（N）
+ * @return int16_t 转换后的int16值（实际值 = force * 100）
+ */
+static int16_t force_to_int16(float force)
+{
+    // 将力值乘以100，然后转换为int16
+    float scaled = force * 100.0f;
+    
+    // 限制范围在int16范围内（-32768到32767）
+    if (scaled > 32767.0f) {
+        return 32767;
+    } else if (scaled < -32768.0f) {
+        return -32768;
+    }
+    return (int16_t)scaled;
+}
+
+/**
+ * @brief 初始化CAN驱动
+ * 
+ * @return esp_err_t 错误码
+ */
+static esp_err_t can_init(void)
+{
+    /** @brief TWAI配置结构体 */
+    twai_general_config_t g_config = TWAI_GENERAL_CONFIG_DEFAULT(CAN_TX_PIN, CAN_RX_PIN, TWAI_MODE_NORMAL);
+    /** @brief TWAI时序配置结构体（1Mbps） */
+    twai_timing_config_t t_config = TWAI_TIMING_CONFIG_1MBITS();
+    /** @brief TWAI滤波配置结构体 */
+    twai_filter_config_t f_config = TWAI_FILTER_CONFIG_ACCEPT_ALL();
+    
+    // 安装TWAI驱动
+    esp_err_t ret = twai_driver_install(&g_config, &t_config, &f_config);
+    if (ret != ESP_OK) {
+        ESP_LOGE(TAG, "CAN驱动安装失败: %s", esp_err_to_name(ret));
+        return ret;
+    }
+    
+    // 启动TWAI驱动
+    ret = twai_start();
+    if (ret != ESP_OK) {
+        ESP_LOGE(TAG, "CAN驱动启动失败: %s", esp_err_to_name(ret));
+        twai_driver_uninstall();
+        return ret;
+    }
+    
+    // 等待CAN总线稳定
+    vTaskDelay(pdMS_TO_TICKS(100));
+    
+    ESP_LOGI(TAG, "CAN驱动初始化成功");
+    return ESP_OK;
+}
+
+/**
+ * @brief 发送传感器力数据（F）到CAN总线
+ * 
+ * @param sensor_data 传感器数据结构指针
+ * @return esp_err_t 错误码
+ */
+static esp_err_t send_force_data_to_can(const sensor_data_t *sensor_data)
+{
+    /** @brief CAN消息结构体 */
+    twai_message_t message;
+    message.identifier = CAN_ID;
+    message.flags = TWAI_MSG_FLAG_NONE;
+    message.data_length_code = 7;  // 帧头1字节 + 3个int16 = 7字节
+    
+    // 将3个方向的力转换为int16并填充到CAN数据中
+    int16_t fx_int16 = force_to_int16(sensor_data->fx);
+    int16_t fy_int16 = force_to_int16(sensor_data->fy);
+    int16_t fz_int16 = force_to_int16(sensor_data->fz);
+    
+    // 填充CAN数据：帧头 + 3个int16（小端序）
+    message.data[0] = CAN_FRAME_HEADER_F;  // 帧头：力数据
+    message.data[1] = (uint8_t)(fx_int16 & 0xFF);
+    message.data[2] = (uint8_t)((fx_int16 >> 8) & 0xFF);
+    message.data[3] = (uint8_t)(fy_int16 & 0xFF);
+    message.data[4] = (uint8_t)((fy_int16 >> 8) & 0xFF);
+    message.data[5] = (uint8_t)(fz_int16 & 0xFF);
+    message.data[6] = (uint8_t)((fz_int16 >> 8) & 0xFF);
+    
+    // 检查CAN总线状态
+    twai_status_info_t status_info;
+    twai_get_status_info(&status_info);
+    if (status_info.state == TWAI_STATE_BUS_OFF) {
+        ESP_LOGE(TAG, "CAN总线处于BUS_OFF状态，尝试恢复");
+        twai_initiate_recovery();
+        vTaskDelay(pdMS_TO_TICKS(100));
+    }
+    
+    // 发送CAN消息（增加超时时间到500ms）
+    esp_err_t ret = twai_transmit(&message, pdMS_TO_TICKS(500));
+    if (ret != ESP_OK) {
+        ESP_LOGE(TAG, "CAN发送力数据失败: %s (状态: %d, 错误: 0x%08X)", 
+                 esp_err_to_name(ret), status_info.state, (unsigned int)status_info.bus_error_count);
+        return ret;
+    }
+    
+    ESP_LOGI(TAG, "CAN力数据帧已发送: ID=0x%02X, Header=0x%02X, Fx=%d, Fy=%d, Fz=%d", 
+             CAN_ID, CAN_FRAME_HEADER_F, fx_int16, fy_int16, fz_int16);
+    
+    return ESP_OK;
+}
+
+/**
+ * @brief 发送传感器力矩数据（M）到CAN总线
+ * 
+ * @param sensor_data 传感器数据结构指针
+ * @return esp_err_t 错误码
+ */
+static esp_err_t send_moment_data_to_can(const sensor_data_t *sensor_data)
+{
+    /** @brief CAN消息结构体 */
+    twai_message_t message;
+    message.identifier = CAN_ID;
+    message.flags = TWAI_MSG_FLAG_NONE;
+    message.data_length_code = 7;  // 帧头1字节 + 3个int16 = 7字节
+    
+    // 将3个方向的力矩转换为int16并填充到CAN数据中
+    int16_t mx_int16 = force_to_int16(sensor_data->mx);
+    int16_t my_int16 = force_to_int16(sensor_data->my);
+    int16_t mz_int16 = force_to_int16(sensor_data->mz);
+    
+    // 填充CAN数据：帧头 + 3个int16（小端序）
+    message.data[0] = CAN_FRAME_HEADER_M;  // 帧头：力矩数据
+    message.data[1] = (uint8_t)(mx_int16 & 0xFF);
+    message.data[2] = (uint8_t)((mx_int16 >> 8) & 0xFF);
+    message.data[3] = (uint8_t)(my_int16 & 0xFF);
+    message.data[4] = (uint8_t)((my_int16 >> 8) & 0xFF);
+    message.data[5] = (uint8_t)(mz_int16 & 0xFF);
+    message.data[6] = (uint8_t)((mz_int16 >> 8) & 0xFF);
+    
+    // 检查CAN总线状态
+    twai_status_info_t status_info;
+    twai_get_status_info(&status_info);
+    if (status_info.state == TWAI_STATE_BUS_OFF) {
+        ESP_LOGE(TAG, "CAN总线处于BUS_OFF状态，尝试恢复");
+        twai_initiate_recovery();
+        vTaskDelay(pdMS_TO_TICKS(100));
+    }
+    
+    // 发送CAN消息（增加超时时间到500ms）
+    esp_err_t ret = twai_transmit(&message, pdMS_TO_TICKS(500));
+    if (ret != ESP_OK) {
+        ESP_LOGE(TAG, "CAN发送力矩数据失败: %s (状态: %d, 错误: 0x%08X)", 
+                 esp_err_to_name(ret), status_info.state, (unsigned int)status_info.bus_error_count);
+        return ret;
+    }
+    
+    ESP_LOGI(TAG, "CAN力矩数据帧已发送: ID=0x%02X, Header=0x%02X, Mx=%d, My=%d, Mz=%d", 
+             CAN_ID, CAN_FRAME_HEADER_M, mx_int16, my_int16, mz_int16);
+    
+    return ESP_OK;
+}
+
+/**
  * @brief 打印接收到的原始数据（十六进制格式）
  * 
  * @param data 数据指针
@@ -323,6 +491,16 @@ static void sensor_read_task(void *arg)
                 if (parse_sensor_data(rx_buffer, &sensor_data) == ESP_OK) {
                     // 打印解析后的数据
                     print_sensor_data(&sensor_data);
+                    
+                    // 发送力数据（F）到CAN总线
+                    if (send_force_data_to_can(&sensor_data) != ESP_OK) {
+                        ESP_LOGW(TAG, "CAN发送力数据失败，但继续运行");
+                    }
+                    
+                    // 发送力矩数据（M）到CAN总线
+                    if (send_moment_data_to_can(&sensor_data) != ESP_OK) {
+                        ESP_LOGW(TAG, "CAN发送力矩数据失败，但继续运行");
+                    }
                 } else {
                     ESP_LOGE(TAG, "解析传感器数据失败");
                 }
@@ -346,6 +524,11 @@ static void sensor_read_task(void *arg)
 void app_main(void)
 {
     ESP_LOGI(TAG, "RS485传感器读取程序启动");
+    
+    // 初始化CAN驱动
+    if (can_init() != ESP_OK) {
+        ESP_LOGE(TAG, "CAN初始化失败，程序将继续运行但无法发送CAN数据");
+    }
     
     // 创建传感器读取任务
     xTaskCreatePinnedToCore(sensor_read_task, "sensor_read_task", TASK_STACK_SIZE, NULL, TASK_PRIO, NULL, 0);
