@@ -23,10 +23,17 @@
 
 #define TAG "RS485_SENSOR"
 
+/** @brief 传感器左右手定义 */
+#define SENSOR_HAND_RIGHT     (0x71)  /**< 右手传感器ID */
+#define SENSOR_HAND_LEFT      (0x72)  /**< 左手传感器ID */
+
+/** @brief 当前使用的传感器手型（可通过修改此宏切换左右手） */
+#define SENSOR_HAND           (SENSOR_HAND_LEFT)  /**< 默认使用右手传感器 */
+
 /** @brief CAN引脚定义 */
 #define CAN_TX_PIN            (6)     /**< CAN发送引脚 */
 #define CAN_RX_PIN            (7)     /**< CAN接收引脚 */
-#define CAN_ID                (0x71)  /**< CAN帧ID */
+#define CAN_ID                (SENSOR_HAND)  /**< CAN帧ID（根据左右手自动设置） */
 
 /** @brief CAN帧头定义 */
 #define CAN_FRAME_HEADER_F    (0x01)  /**< 力数据帧头 */
@@ -44,7 +51,7 @@
 #define BAUD_RATE           (115200)/**< 波特率 */
 
 /** @brief 任务配置 */
-#define TASK_STACK_SIZE     (3072)  /**< 任务栈大小 */
+#define TASK_STACK_SIZE     (8192)  /**< 任务栈大小 */
 #define TASK_PRIO           (10)    /**< 任务优先级 */
 
 /** @brief 超时配置 */
@@ -459,12 +466,12 @@ static void sensor_read_task(void *arg)
     
     sensor_data_t sensor_data = {0};
     TickType_t last_send_time = 0;
-    const TickType_t send_interval = pdMS_TO_TICKS(100); // 每1秒发送一次读取指令
+    const TickType_t send_interval = pdMS_TO_TICKS(30); // 每30ms发送一次读取指令
     
     while (1) {
         TickType_t current_time = xTaskGetTickCount();
         
-        // 检查是否需要发送读取指令（每1秒发送一次）
+        // 检查是否需要发送读取指令（每100ms发送一次）
         if ((current_time - last_send_time) >= send_interval) {
             // 清空接收缓冲区
             uart_flush(uart_num);
@@ -483,7 +490,7 @@ static void sensor_read_task(void *arg)
         
         if (len > 0) {
             // 打印原始数据
-            print_raw_data(rx_buffer, len);
+            //print_raw_data(rx_buffer, len);
             
             // 检查数据长度
             if (len == RESPONSE_LEN) {
@@ -510,7 +517,7 @@ static void sensor_read_task(void *arg)
         }
         
         // 短暂延时，避免CPU占用过高
-        vTaskDelay(pdMS_TO_TICKS(10));
+        vTaskDelay(pdMS_TO_TICKS(1));
     }
     
     // 释放资源（理论上不会执行到这里）

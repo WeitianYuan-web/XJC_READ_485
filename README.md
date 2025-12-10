@@ -25,7 +25,9 @@
 - **TX引脚**：GPIO6
 - **RX引脚**：GPIO7
 - **波特率**：1 Mbps
-- **CAN ID**：0x71
+- **CAN ID**：根据左右手传感器自动设置
+  - 右手传感器：0x71
+  - 左手传感器：0x72
 
 ### 传感器配置
 
@@ -49,7 +51,7 @@
 ### CAN数据格式
 
 #### 力数据帧（帧头：0x01）
-- **CAN ID**：0x71
+- **CAN ID**：根据左右手传感器设置（右手：0x71，左手：0x72）
 - **数据长度**：7字节
 - **数据格式**：
   ```
@@ -58,7 +60,7 @@
 - **数据说明**：力值乘以100后转换为int16（小端序）
 
 #### 力矩数据帧（帧头：0x02）
-- **CAN ID**：0x71
+- **CAN ID**：根据左右手传感器设置（右手：0x71，左手：0x72）
 - **数据长度**：7字节
 - **数据格式**：
   ```
@@ -129,6 +131,8 @@ I (xxx) RS485_SENSOR: Mz: -0.00023 N·m
 I (xxx) RS485_SENSOR: ================================
 I (xxx) RS485_SENSOR: CAN力数据帧已发送: ID=0x71, Header=0x01, Fx=-45, Fy=217, Fz=29
 I (xxx) RS485_SENSOR: CAN力矩数据帧已发送: ID=0x71, Header=0x02, Mx=0, My=-81, Mz=0
+
+**注意**：CAN ID会根据配置的左右手传感器自动设置（右手0x71，左手0x72）
 ```
 
 ## 故障排除
@@ -206,18 +210,34 @@ XJC_READ_485/
 #define CAN_RX_PIN            (7)     // CAN接收引脚
 ```
 
-### 修改CAN ID
+### 修改CAN ID（通过左右手传感器配置）
 
-在 `main/6DForce.c` 中修改：
+在 `main/6DForce.c` 中修改传感器手型，CAN ID会自动设置：
 ```c
-#define CAN_ID                (0x71)  // CAN帧ID
+// 使用右手传感器（CAN ID = 0x71）
+#define SENSOR_HAND           (SENSOR_HAND_RIGHT)
+
+// 或使用左手传感器（CAN ID = 0x72）
+#define SENSOR_HAND           (SENSOR_HAND_LEFT)
 ```
+
+**左右手传感器ID定义**：
+- `SENSOR_HAND_RIGHT`：右手传感器ID（0x71）
+- `SENSOR_HAND_LEFT`：左手传感器ID（0x72）
+
+**注意**：修改 `SENSOR_HAND` 宏后，`CAN_ID` 会自动更新为对应的值。
 
 ## 许可证
 
 本项目仅供学习和研究使用。
 
 ## 更新日志
+
+### v1.1
+- 新增左右手传感器区分功能
+- 支持通过 `#define` 宏定义切换左右手传感器
+- 右手传感器CAN ID：0x71
+- 左手传感器CAN ID：0x72
 
 ### v1.0
 - 初始版本
