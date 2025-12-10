@@ -471,7 +471,7 @@ static void sensor_read_task(void *arg)
     while (1) {
         TickType_t current_time = xTaskGetTickCount();
         
-        // 检查是否需要发送读取指令（每100ms发送一次）
+        // 检查是否需要发送读取指令（每30ms发送一次）
         if ((current_time - last_send_time) >= send_interval) {
             // 清空接收缓冲区
             uart_flush(uart_num);
